@@ -1,10 +1,44 @@
 import streamlit as st
-import openai
+import sys
+import subprocess
+import os
+from pathlib import Path
+
+# 필요한 패키지 설치
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "python-dotenv"])
+    from dotenv import load_dotenv
+
+# OpenAI 모듈이 없을 경우 자동으로 설치
+try:
+    from openai import OpenAI
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "openai==0.28.0"])
+    from openai import OpenAI
+
 import json
 from datetime import datetime
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+
+# 환경 변수 로드
+def load_api_key():
+    # .env 파일 로드
+    env_path = Path('.') / '.env'
+    load_dotenv(env_path)
+    
+    # 환경 변수에서 API 키 가져오기
+    api_key = os.getenv('OPENAI_API_KEY')
+    
+    if not api_key:
+        # API 키가 환경 변수에 없으면 세션 상태에서 확인
+        if 'openai_api_key' in st.session_state:
+            api_key = st.session_state.openai_api_key
+    
+    return api_key
 
 # 페이지 설정
 st.set_page_config(
@@ -70,9 +104,20 @@ st.markdown("""
 with st.sidebar:
     st.header("🔧 설정")
     
-    # API 키 입력
-    api_key = st.text_input("OpenAI API Key", type="password", 
-                           help="OpenAI API 키를 입력하세요")
+    # API 키 입력 (환경 변수에서 가져오기)
+    api_key = load_api_key()
+    if not api_key:
+        api_key = st.text_input(
+            "OpenAI API Key", 
+            type="password",
+            help="OpenAI API 키를 입력하세요. 입력한 키는 환경 변수에 저장됩니다."
+        )
+        if api_key:
+            st.session_state.openai_api_key = api_key
+            # API 키를 .env 파일에 저장
+            with open('.env', 'w') as f:
+                f.write(f'OPENAI_API_KEY={api_key}')
+            st.success("API 키가 저장되었습니다!")
     
     # 수술 유형 선택
     surgery_type = st.selectbox(
@@ -98,18 +143,21 @@ if 'understanding_score' not in st.session_state:
     st.session_state.understanding_score = {}
 if 'consent_progress' not in st.session_state:
     st.session_state.consent_progress = 0
+if 'additional_chat_history' not in st.session_state:
+    st.session_state.additional_chat_history = []
 
 # LLM 설정 함수
-def setup_llm(api_key):
+def setup_llm():
+    api_key = load_api_key()
     if api_key:
-        openai.api_key = api_key
-        return True
-    return False
+        return OpenAI(api_key=api_key)
+    return None
 
 # 맞춤형 설명 생성 함수
 def generate_explanation(content, user_profile, question_type="general"):
-    if not setup_llm(api_key):
-        return "API 키를 입력해주세요."
+    client = setup_llm()
+    if not client:
+        return "OpenAI API 키를 입력해주세요."
     
     # 사용자 프로필에 따른 프롬프트 생성
     profile_context = f"""
@@ -131,25 +179,42 @@ def generate_explanation(content, user_profile, question_type="general"):
     3. 구체적인 예시와 비유 활용
     4. 환자의 불안감을 줄이는 따뜻한 톤
     5. 정확하고 신뢰할 수 있는 정보 제공
-    6. 필요시 시각적 설명 제안
+    6. 반드시 100자 이내로 답변할 것
+    7. 핵심적인 내용만 간단명료하게 설명
     """
     
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": content}
+                {"role": "user", "content": f"다음 질문에 대해 100자 이내로 답변해주세요: {content}"}
             ],
             temperature=0.7,
-            max_tokens=1000
+            max_tokens=200
         )
-        return response.choices[0].message.content
+        answer = response.choices[0].message.content
+        # 100자로 제한
+        if len(answer) > 100:
+            answer = answer[:97] + "..."
+        return answer
     except Exception as e:
-        return f"설명 생성 중 오류가 발생했습니다: {str(e)}"
+        error_msg = str(e)
+        if "insufficient_quota" in error_msg:
+            return "⚠️ API 사용량이 초과되었습니다."
+        elif "invalid_request_error" in error_msg:
+            return "⚠️ 잘못된 API 요청입니다."
+        elif "invalid_api_key" in error_msg:
+            return "⚠️ 유효하지 않은 API 키입니다."
+        else:
+            return "⚠️ 오류가 발생했습니다."
 
 # 이해도 평가 함수
 def evaluate_understanding(question, answer):
+    client = setup_llm()
+    if not client:
+        return {"score": 5, "feedback": "OpenAI API 키가 설정되지 않았습니다.", "areas_to_improve": []}
+
     evaluation_prompt = f"""
     다음 질문과 답변을 바탕으로 환자의 이해도를 1-10점으로 평가해주세요.
     
@@ -167,14 +232,26 @@ def evaluate_understanding(question, answer):
     """
     
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": evaluation_prompt}],
             temperature=0.3
         )
         return json.loads(response.choices[0].message.content)
-    except:
-        return {"score": 5, "feedback": "평가 중 오류가 발생했습니다.", "areas_to_improve": []}
+    except Exception as e:
+        error_msg = str(e)
+        if "insufficient_quota" in error_msg:
+            return {
+                "score": 0,
+                "feedback": "API 사용량이 초과되었습니다. 관리자에게 문의해주세요.",
+                "areas_to_improve": ["API 키 확인 필요"]
+            }
+        else:
+            return {
+                "score": 0,
+                "feedback": f"평가 중 오류가 발생했습니다: {error_msg}",
+                "areas_to_improve": []
+            }
 
 # 메인 탭 구성
 tab1, tab2, tab3, tab4 = st.tabs(["📋 동의서 설명", "❓ 질의응답", "📊 이해도 평가", "📈 진행 현황"])
@@ -209,20 +286,111 @@ with tab1:
         
         st.markdown(f'<div class="info-box">{explanation}</div>', unsafe_allow_html=True)
         
-        # 추가 질문 제안
+        # 추가 질문 섹션을 챗봇 형식으로 변경
         if api_key:
-            st.subheader("🤔 추가로 궁금한 점이 있으신가요?")
+            st.markdown("""
+            <div style='margin: 2rem 0;'>
+                <div class="section-header">
+                    <h4>🤖 추가로 궁금하신 점이 있으신가요?</h4>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # 채팅 히스토리 표시
+            chat_container = st.container()
+            with chat_container:
+                for chat in st.session_state.additional_chat_history:
+                    if chat["role"] == "user":
+                        st.markdown(f"""
+                        <div style='display: flex; justify-content: flex-end; margin: 1rem 0;'>
+                            <div style='background-color: #e9ecef; padding: 0.8rem; border-radius: 15px; max-width: 80%;'>
+                                <p style='margin: 0;'>{chat["content"]}</p>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"""
+                        <div style='display: flex; margin: 1rem 0;'>
+                            <div style='background-color: #007bff; color: white; padding: 0.8rem; border-radius: 15px; max-width: 80%;'>
+                                <p style='margin: 0;'>{chat["content"]}</p>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+            # 직접 질문 입력
+            st.markdown("<div style='margin-top: 2rem;'><h5>✍️ 직접 질문하기</h5></div>", unsafe_allow_html=True)
+            user_question = st.text_input("질문을 입력해주세요:", key="additional_question")
+            
+            # 전송 버튼
+            if st.button("전송", key="send_additional"):
+                if user_question:
+                    user_profile = {
+                        'age_group': age_group,
+                        'education_level': education_level,
+                        'medical_knowledge': medical_knowledge,
+                        'language': language
+                    }
+                    
+                    # 사용자 질문을 히스토리에 추가
+                    st.session_state.additional_chat_history.append({
+                        "role": "user",
+                        "content": user_question
+                    })
+                    
+                    # AI 응답 생성
+                    answer = generate_explanation(user_question, user_profile)
+                    
+                    # AI 응답을 히스토리에 추가
+                    st.session_state.additional_chat_history.append({
+                        "role": "assistant",
+                        "content": answer
+                    })
+                    st.rerun()
+
+            # 추천 질문 버튼들
+            st.markdown("<div style='margin-top: 2rem;'><h5>💡 자주 묻는 질문</h5></div>", unsafe_allow_html=True)
+            
+            # 더 많은 추천 질문 추가
             suggested_questions = [
                 f"{surgery_type} 수술 시간은 얼마나 걸리나요?",
                 "로봇수술과 일반수술의 차이점은 무엇인가요?",
                 "수술 후 회복 기간은 어느 정도인가요?",
-                "수술 비용은 어느 정도 예상해야 하나요?"
+                "수술 비용은 어느 정도 예상해야 하나요?",
+                "수술 후 통증은 어느 정도인가요?",
+                "수술 후 일상생활 복귀는 언제 가능한가요?",
+                "수술 전 주의사항은 무엇인가요?",
+                "수술 후 관리는 어떻게 해야 하나요?"
             ]
             
-            for question in suggested_questions:
-                if st.button(question, key=f"suggest_{question}"):
-                    answer = generate_explanation(question, user_profile)
-                    st.markdown(f'<div class="success-box">{answer}</div>', unsafe_allow_html=True)
+            # 2열로 버튼 배치
+            cols = st.columns(2)
+            for i, question in enumerate(suggested_questions):
+                with cols[i % 2]:
+                    if st.button(f"🔍 {question}", key=f"suggest_{i}", 
+                               use_container_width=True,
+                               help="클릭하시면 답변이 생성됩니다"):
+                        user_profile = {
+                            'age_group': age_group,
+                            'education_level': education_level,
+                            'medical_knowledge': medical_knowledge,
+                            'language': language
+                        }
+                        
+                        # 사용자 질문을 히스토리에 추가
+                        st.session_state.additional_chat_history.append({
+                            "role": "user",
+                            "content": question
+                        })
+                        
+                        # AI 응답 생성
+                        answer = generate_explanation(question, user_profile)
+                        
+                        # AI 응답을 히스토리에 추가
+                        st.session_state.additional_chat_history.append({
+                            "role": "assistant",
+                            "content": answer
+                        })
+                        st.rerun()
 
 with tab2:
     st.markdown('<div class="section-header"><h3>실시간 질의응답</h3></div>', 
