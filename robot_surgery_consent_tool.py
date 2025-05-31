@@ -1,44 +1,14 @@
 import streamlit as st
-import sys
-import subprocess
 import os
-from pathlib import Path
+from dotenv import load_dotenv
+from openai import OpenAI
 
-# 필요한 패키지 설치
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "python-dotenv"])
-    from dotenv import load_dotenv
+# 환경변수 로딩
+load_dotenv()
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# OpenAI 모듈이 없을 경우 자동으로 설치
-try:
-    from openai import OpenAI
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "openai==0.28.0"])
-    from openai import OpenAI
-
-import json
-from datetime import datetime
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-
-# 환경 변수 로드
-def load_api_key():
-    # .env 파일 로드
-    env_path = Path('.') / '.env'
-    load_dotenv(env_path)
-    
-    # 환경 변수에서 API 키 가져오기
-    api_key = os.getenv('OPENAI_API_KEY')
-    
-    if not api_key:
-        # API 키가 환경 변수에 없으면 세션 상태에서 확인
-        if 'openai_api_key' in st.session_state:
-            api_key = st.session_state.openai_api_key
-    
-    return api_key
+if "additional_chat_history" not in st.session_state:
+    st.session_state.additional_chat_history = []
 
 # 페이지 설정
 st.set_page_config(
@@ -104,21 +74,6 @@ st.markdown("""
 with st.sidebar:
     st.header("🔧 설정")
     
-    # API 키 입력 (환경 변수에서 가져오기)
-    api_key = load_api_key()
-    if not api_key:
-        api_key = st.text_input(
-            "OpenAI API Key", 
-            type="password",
-            help="OpenAI API 키를 입력하세요. 입력한 키는 환경 변수에 저장됩니다."
-        )
-        if api_key:
-            st.session_state.openai_api_key = api_key
-            # API 키를 .env 파일에 저장
-            with open('.env', 'w') as f:
-                f.write(f'OPENAI_API_KEY={api_key}')
-            st.success("API 키가 저장되었습니다!")
-    
     # 수술 유형 선택
     surgery_type = st.selectbox(
         "수술 유형 선택",
@@ -136,35 +91,21 @@ with st.sidebar:
     # 언어 설정
     language = st.selectbox("설명 언어", ["한국어", "English", "中文", "日本語"])
 
-# 초기 세션 상태 설정
-if 'chat_history' not in st.session_state:
-    st.session_state.chat_history = []
-if 'understanding_score' not in st.session_state:
-    st.session_state.understanding_score = {}
-if 'consent_progress' not in st.session_state:
-    st.session_state.consent_progress = 0
-if 'additional_chat_history' not in st.session_state:
-    st.session_state.additional_chat_history = []
+    user_profile = {
+    'age_group': age_group,
+    'education_level': education_level,
+    'medical_knowledge': medical_knowledge,
+    'surgery_type': surgery_type,
+    'language': language
+}
 
-# LLM 설정 함수
-def setup_llm():
-    api_key = load_api_key()
-    if api_key:
-        return OpenAI(api_key=api_key)
-    return None
-
-# 맞춤형 설명 생성 함수
-def generate_explanation(content, user_profile, question_type="general"):
-    client = setup_llm()
-    if not client:
-        return "OpenAI API 키를 입력해주세요."
-    
     # 사용자 프로필에 따른 프롬프트 생성
     profile_context = f"""
     사용자 프로필:
     - 연령대: {user_profile['age_group']}
     - 교육 수준: {user_profile['education_level']}
     - 의료 지식: {user_profile['medical_knowledge']}
+    - 수술 종류: {user_profile['surgery_type']}
     - 언어: {user_profile['language']}
     """
     
@@ -179,82 +120,42 @@ def generate_explanation(content, user_profile, question_type="general"):
     3. 구체적인 예시와 비유 활용
     4. 환자의 불안감을 줄이는 따뜻한 톤
     5. 정확하고 신뢰할 수 있는 정보 제공
-    6. 반드시 100자 이내로 답변할 것
+    6. 반드시 300자 이내로 답변할 것
     7. 핵심적인 내용만 간단명료하게 설명
     """
-    
-    try:
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"다음 질문에 대해 100자 이내로 답변해주세요: {content}"}
-            ],
-            temperature=0.7,
-            max_tokens=200
-        )
-        answer = response.choices[0].message.content
-        # 100자로 제한
-        if len(answer) > 100:
-            answer = answer[:97] + "..."
-        return answer
-    except Exception as e:
-        error_msg = str(e)
-        if "insufficient_quota" in error_msg:
-            return "⚠️ API 사용량이 초과되었습니다."
-        elif "invalid_request_error" in error_msg:
-            return "⚠️ 잘못된 API 요청입니다."
-        elif "invalid_api_key" in error_msg:
-            return "⚠️ 유효하지 않은 API 키입니다."
-        else:
-            return "⚠️ 오류가 발생했습니다."
 
-# 이해도 평가 함수
-def evaluate_understanding(question, answer):
-    client = setup_llm()
-    if not client:
-        return {"score": 5, "feedback": "OpenAI API 키가 설정되지 않았습니다.", "areas_to_improve": []}
 
-    evaluation_prompt = f"""
-    다음 질문과 답변을 바탕으로 환자의 이해도를 1-10점으로 평가해주세요.
-    
-    질문: {question}
-    답변: {answer}
-    
-    평가 기준:
-    - 의료 용어 이해도
-    - 수술 절차 이해도
-    - 위험성 인지도
-    - 전반적 이해도
-    
-    JSON 형태로 응답해주세요:
-    {{"score": 점수, "feedback": "피드백", "areas_to_improve": ["개선영역1", "개선영역2"]}}
+def generate_explanation(prompt, profile):
+    full_prompt = f"""
+    사용자 프로필:
+    - 연령대: {profile['age_group']}
+    - 교육 수준: {profile['education_level']}
+    - 의료 지식: {profile['medical_knowledge']}
+    - 수술 종류: {profile['surgery_type']}
+    - 언어: {profile['language']}
+
+    설명 요청: {prompt}
+
+    위 사용자에게 친절하고 이해하기 쉽게 300자 이내로 설명해 주세요.
     """
     
     try:
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": evaluation_prompt}],
-            temperature=0.3
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "당신은 의료 커뮤니케이션 전문가입니다."},
+                {"role": "user", "content": full_prompt}
+            ],
+            temperature=0.7,
+            max_tokens=300
         )
-        return json.loads(response.choices[0].message.content)
+        return response.choices[0].message.content
     except Exception as e:
-        error_msg = str(e)
-        if "insufficient_quota" in error_msg:
-            return {
-                "score": 0,
-                "feedback": "API 사용량이 초과되었습니다. 관리자에게 문의해주세요.",
-                "areas_to_improve": ["API 키 확인 필요"]
-            }
-        else:
-            return {
-                "score": 0,
-                "feedback": f"평가 중 오류가 발생했습니다: {error_msg}",
-                "areas_to_improve": []
-            }
+        return f"오류 발생: {e}"
+
 
 # 메인 탭 구성
-tab1, tab2, tab3, tab4 = st.tabs(["📋 동의서 설명", "❓ 질의응답", "📊 이해도 평가", "📈 진행 현황"])
+tab1, tab2, tab3 = st.tabs(["📋 동의서 설명", "❓ 질의응답", "📊 퀴즈"])
 
 with tab1:
     st.markdown('<div class="section-header"><h3>수술동의서 맞춤형 설명</h3></div>', 
@@ -276,18 +177,19 @@ with tab1:
     if st.button("맞춤형 설명 생성", type="primary"):
         user_profile = {
             'age_group': age_group,
+            'surgery_type': surgery_type,
             'education_level': education_level,
             'medical_knowledge': medical_knowledge,
             'language': language
         }
-        
         explanation_request = f"{surgery_type}의 {selected_section}에 대해 자세히 설명해주세요."
         explanation = generate_explanation(explanation_request, user_profile)
-        
+
         st.markdown(f'<div class="info-box">{explanation}</div>', unsafe_allow_html=True)
-        
+
+
         # 추가 질문 섹션을 챗봇 형식으로 변경
-        if api_key:
+        if os.getenv("OPENAI_API_KEY"):
             st.markdown("""
             <div style='margin: 2rem 0;'>
                 <div class="section-header">
@@ -464,68 +366,6 @@ with tab3:
             })
             
             st.markdown(f'<div class="info-box">{quiz_content}</div>', unsafe_allow_html=True)
-    
-    # 이해도 점수 시각화
-    if st.session_state.understanding_score:
-        st.subheader("📊 이해도 변화 추이")
-        
-        df = pd.DataFrame(list(st.session_state.understanding_score.items()), 
-                         columns=['항목', '점수'])
-        
-        fig = px.bar(df, x='항목', y='점수', 
-                    title="항목별 이해도 점수",
-                    color='점수',
-                    color_continuous_scale='viridis')
-        st.plotly_chart(fig, use_container_width=True)
-
-with tab4:
-    st.markdown('<div class="section-header"><h3>동의서 이해 진행 현황</h3></div>', 
-                unsafe_allow_html=True)
-    
-    # 진행률 계산
-    total_sections = len(consent_sections)
-    completed_sections = st.session_state.consent_progress
-    progress_percentage = (completed_sections / total_sections) * 100
-    
-    # 진행률 표시
-    st.metric("전체 진행률", f"{progress_percentage:.1f}%", 
-              f"{completed_sections}/{total_sections} 완료")
-    
-    progress_bar = st.progress(progress_percentage / 100)
-    
-    # 섹션별 체크리스트
-    st.subheader("📝 동의서 항목별 체크리스트")
-    
-    col1, col2 = st.columns(2)
-    
-    for i, section in enumerate(consent_sections):
-        with col1 if i % 2 == 0 else col2:
-            if st.checkbox(section, key=f"section_{i}"):
-                if i not in st.session_state.get('completed_items', set()):
-                    st.session_state.consent_progress += 1
-                    if 'completed_items' not in st.session_state:
-                        st.session_state.completed_items = set()
-                    st.session_state.completed_items.add(i)
-    
-    # 완료 상태 요약
-    if progress_percentage == 100:
-        st.success("🎉 모든 항목을 완료했습니다! 수술동의서에 대한 이해가 충분합니다.")
-        
-        if st.button("최종 이해도 리포트 생성"):
-            st.markdown("""
-            <div class="success-box">
-                <h4>🏆 최종 이해도 리포트</h4>
-                <p>• 전체 동의서 항목 완료: ✅</p>
-                <p>• 질의응답 참여: ✅</p>
-                <p>• 맞춤형 설명 이용: ✅</p>
-                <p><strong>환자분께서 수술동의서 내용을 충분히 이해하셨습니다.</strong></p>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    elif progress_percentage >= 50:
-        st.warning(f"절반 이상 진행했습니다. 나머지 {total_sections - completed_sections}개 항목을 확인해주세요.")
-    else:
-        st.info("동의서 이해를 위해 각 항목을 차근차근 확인해주세요.")
 
 # 하단 정보
 st.markdown("---")
