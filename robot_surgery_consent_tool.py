@@ -3,12 +3,18 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 
-# 환경변수 로딩
-load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# 환경 변수 로딩 방식 변경
+# load_dotenv()
 
-if "additional_chat_history" not in st.session_state:
-    st.session_state.additional_chat_history = []
+# OpenAI 클라이언트 설정
+
+try:
+    api_key = st.secrets["OPENAI_API_KEY"]
+except KeyError:
+    st.error("API 키가 설정되지 않았습니다. Streamlit secrets를 확인하세요.")
+    st.stop()
+
+client = OpenAI(api_key=api_key)
 
 # 페이지 설정
 st.set_page_config(
